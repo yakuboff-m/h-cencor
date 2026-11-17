@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>Video Probe</title></head>
+<body>
+  <video id="v" src="samples/real_video.webm" preload="metadata" muted playsinline></video>
+  <pre id="out"></pre>
+  <script>
+    const v = document.getElementById('v');
+    const out = document.getElementById('out');
+    v.onloadedmetadata = () => {
+      out.textContent = JSON.stringify({
+        duration: v.duration,
+        videoWidth: v.videoWidth,
+        videoHeight: v.videoHeight,
+        hasRVFC: 'requestVideoFrameCallback' in HTMLVideoElement.prototype
+      });
+    };
+  </script>
+</body>
+</html>

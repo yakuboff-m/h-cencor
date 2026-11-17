@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head><title>Generate Ground Truth Masks</title></head>
+<body style="margin:0; background:#000;">
+  <canvas id="c" width="801" height="1112"></canvas>
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    
+    // Clear black
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, 801, 1112);
+
+    const params = new URLSearchParams(window.location.search);
+    const type = params.get('type');
+
+    if (type === 'target') {
+      // Independent Ground Truth for Sensitive Anatomy (Breasts + Genitalia)
+      ctx.fillStyle = '#ffffff';
+      // Left Breast anatomical zone (inscribed organic contour)
+      ctx.beginPath();
+      ctx.ellipse(268, 505, 52, 60, -0.1, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // Right Breast anatomical zone (inscribed organic contour)
+      ctx.beginPath();
+      ctx.ellipse(438, 525, 54, 62, 0.1, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // Genitalia anatomical zone
+      ctx.beginPath();
+      ctx.ellipse(232, 955, 34, 40, 0, 0, 2 * Math.PI);
+      ctx.fill();
+    } else if (type === 'body') {
+      // Independent Ground Truth for Human Body Silhouette
+      ctx.fillStyle = '#ffffff';
+      // Head
+      ctx.beginPath();
+      ctx.ellipse(365, 240, 75, 100, 0, 0, 2 * Math.PI);
+      ctx.fill();
+      // Torso & Upper body
+      ctx.beginPath();
+      ctx.ellipse(350, 560, 150, 240, 0, 0, 2 * Math.PI);
+      ctx.fill();
+      // Lower body / legs
+      ctx.beginPath();
+      ctx.ellipse(320, 890, 160, 180, 0, 0, 2 * Math.PI);
+      ctx.fill();
+      // Arms
+      ctx.beginPath();
+      ctx.ellipse(170, 520, 45, 140, 0.2, 0, 2 * Math.PI);
+      ctx.ellipse(530, 540, 45, 140, -0.2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  </script>
+</body>
+</html>

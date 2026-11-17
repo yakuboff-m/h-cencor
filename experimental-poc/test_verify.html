@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Phase 3 Verification Runner</title>
+  <script src="lib/ort.min.js"></script>
+</head>
+<body style="background:#111; color:#fff; font-family:monospace; padding:20px;">
+  <h1>Phase 3 Model Execution & Verification</h1>
+  <div id="status">Initializing ONNX Runtime...</div>
+  <pre id="output"></pre>
+  <canvas id="cDet" width="320" height="320" style="display:none;"></canvas>
+  <canvas id="cSeg" width="256" height="256" style="display:none;"></canvas>
+
+  <script>
+    const ANATOMICAL_LABELS = [
+      "FEMALE_GENITALIA_COVERED",  // 0
+      "FACE_FEMALE",              // 1
+      "BUTTOCKS_EXPOSED",         // 2
+      "FEMALE_BREAST_EXPOSED",    // 3
+      "FEMALE_GENITALIA_EXPOSED",  // 4
+      "MALE_BREAST_EXPOSED",      // 5
+      "ANUS_EXPOSED",             // 6
+      "FEET_EXPOSED",             // 7
+      "BELLY_COVERED",            // 8
+      "FEET_COVERED",             // 9
+      "ARMPITS_COVERED",          // 10
+      "ARMPITS_EXPOSED",          // 11
+      "FACE_MALE",                // 12
+      "BELLY_EXPOSED",            // 13
+      "MALE_GENITALIA_EXPOSED",   // 14
+      "ANUS_COVERED",             // 15
+      "FEMALE_BREAST_COVERED",    // 16
+      "BUTTOCKS_COVERED"          // 17
+    ];
+
+    const out = document.getElementById('output');
+    function log(msg) {
+      console.log(msg);
+      out.textContent += msg + '\n';
+    }
+
+    async function runTest() {
+      try {
+        ort.env.wasm.wasmPaths = 'lib/';
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.simd = true;
+
+        log('Loading detector model/320n.onnx...');
+        const detSession = await ort.InferenceSession.create('model/320n.onnx', { executionProviders: ['wasm'] });
+        log(`Detector loaded. Inputs: ${JSON.stringify(detSession.inputNames)}, Outputs: ${JSON.stringify(detSession.outputNames)}`);
+
+        log('Loading segmenter model/selfie_segmentation_fp32.onnx...');
+        const segSession = await ort.InferenceSession.create('model/selfie_segmentation_fp32.onnx', { executionProviders: ['wasm'] });
+        log(`Segmenter loaded. Inputs: ${JSON.stringify(segSession.inputNames)}, Outputs: ${JSON.stringify(segSession.outputNames)}`);
+
+        // Load real_sample.jpg
+        log('Loading samples/real_sample.jpg...');
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'samples/real_sample.jpg';
+        });
+        log(`Image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+
+        // --- Run Detector Preprocessing ---
+        const t0 = performance.now();
+        const detCanvas = document.getElementById('cDet');
+        const detCtx = detCanvas.getContext('2d');
+        detCtx.drawImage(img, 0, 0, 320, 320);
+        const detImgData = detCtx.getImageData(0, 0, 320, 320).data;
+
+        // Planar Float32 [1, 3, 320, 320] normalized 0..1
+        const detInput = new Float32Array(1 * 3 * 320 * 320);
+        for (let i = 0; i < 320 * 320; i++) {
+          detInput[i] = detImgData[i * 4] / 255.0;                      // R
+          detInput[320 * 320 + i] = detImgData[i * 4 + 1] / 255.0;      // G
+          detInput[2 * 320 * 320 + i] = detImgData[i * 4 + 2] / 255.0;  // B
+        }
+        const detTensor = new ort.Tensor('float32', detInput, [1, 3, 320, 320]);
+        const detFeeds = { [detSession.inputNames[0]]: detTensor };
+        const detRes = await detSession.run(detFeeds);
+        const detTime = performance.now() - t0;
+        log(`Detector inference time: ${detTime.toFixed(1)} ms`);
+
+        // Parse YOLOv8 outputs: [1, 22, 2100]
+        const outputTensor = detRes[detSession.outputNames[0]];
+        const data = outputTensor.data;
+        const numClasses = 18;
+        const numProposals = 2100;
+        const scaleX = img.naturalWidth / 320;
+        const scaleY = img.naturalHeight / 320;
+
+        const candidates = [];
+        for (let i = 0; i < numProposals; i++) {
+          let maxScore = -1;
+          let maxClass = -1;
+          for (let c = 0; c < numClasses; c++) {
+            const score = data[(4 + c) * numProposals + i];
+            if (score > maxScore) {
+              maxScore = score;
+              maxClass = c;
+            }
+          }
+
+          if (maxScore > 0.15) {
+            const cx = data[0 * numProposals + i];
+            const cy = data[1 * numProposals + i];
+            const w = data[2 * numProposals + i];
+            const h = data[3 * numProposals + i];
+
+            const x1 = Math.max(0, (cx - w / 2) * scaleX);
+            const y1 = Math.max(0, (cy - h / 2) * scaleY);
+            const boxW = Math.min(img.naturalWidth - x1, w * scaleX);
+            const boxH = Math.min(img.naturalHeight - y1, h * scaleY);
+
+            candidates.push({
+              classId: maxClass,
+              label: ANATOMICAL_LABELS[maxClass] || `CLASS_${maxClass}`,
+              score: maxScore,
+              box: [Math.round(x1), Math.round(y1), Math.round(boxW), Math.round(boxH)]
+            });
+          }
+        }
+
+        // Apply NMS (IoU 0.45)
+        candidates.sort((a, b) => b.score - a.score);
+        const kept = [];
+        for (const cand of candidates) {
+          let overlap = false;
+          for (const k of kept) {
+            if (cand.classId === k.classId) {
+              const [ax, ay, aw, ah] = cand.box;
+              const [bx, by, bw, bh] = k.box;
+              const xA = Math.max(ax, bx);
+              const yA = Math.max(ay, by);
+              const xB = Math.min(ax + aw, bx + bw);
+              const yB = Math.min(ay + ah, by + bh);
+              const inter = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+              const union = (aw * ah) + (bw * bh) - inter;
+              if (inter / union > 0.45) {
+                overlap = true;
+                break;
+              }
+            }
+          }
+          if (!overlap) kept.push(cand);
+        }
+
+        log(`Raw Detections count (score > 0.15, NMS 0.45): ${kept.length}`);
+        kept.forEach((d, idx) => {
+          log(`  #${idx + 1}: ${d.label} (${(d.score * 100).toFixed(1)}%) -> Box [${d.box.join(', ')}]`);
+        });
+
+        // --- Run MediaPipe Segmenter Preprocessing ---
+        const t1 = performance.now();
+        const segCanvas = document.getElementById('cSeg');
+        const segCtx = segCanvas.getContext('2d');
+        segCtx.drawImage(img, 0, 0, 256, 256);
+        const segImgData = segCtx.getImageData(0, 0, 256, 256).data;
+
+        // Planar Float32 [1, 3, 256, 256] normalized 0..1
+        const segInput = new Float32Array(1 * 3 * 256 * 256);
+        for (let i = 0; i < 256 * 256; i++) {
+          segInput[i] = segImgData[i * 4] / 255.0;                      // R
+          segInput[256 * 256 + i] = segImgData[i * 4 + 1] / 255.0;      // G
+          segInput[2 * 256 * 256 + i] = segImgData[i * 4 + 2] / 255.0;  // B
+        }
+        const segTensor = new ort.Tensor('float32', segInput, [1, 3, 256, 256]);
+        const segFeeds = { [segSession.inputNames[0]]: segTensor };
+        const segRes = await segSession.run(segFeeds);
+        const segTime = performance.now() - t1;
+        log(`Segmenter inference time: ${segTime.toFixed(1)} ms`);
+
+        const alphaTensor = segRes[segSession.outputNames[0]];
+        const alphas = alphaTensor.data; // Float32Array of 256*256
+        let foregroundCount = 0;
+        let backgroundCount = 0;
+        for (let i = 0; i < alphas.length; i++) {
+          if (alphas[i] > 0.5) foregroundCount++;
+          else backgroundCount++;
+        }
+        log(`Segmenter alphas size: ${alphas.length} (256x256). Foreground pixels (>0.5): ${foregroundCount} (${((foregroundCount / alphas.length) * 100).toFixed(1)}%), Background pixels: ${backgroundCount}`);
+
+        document.getElementById('status').textContent = 'VERIFICATION SUCCESSFUL';
+        window.__PHASE3_VERIFIED__ = {
+          detections: kept,
+          detTime,
+          segTime,
+          foregroundCount,
+          totalPixels: alphas.length
+        };
+      } catch (err) {
+        log(`ERROR: ${err.message}\n${err.stack}`);
+        document.getElementById('status').textContent = 'ERROR: ' + err.message;
+      }
+    }
+
+    window.onload = runTest;
+  </script>
+</body>
+</html>
